@@ -81,3 +81,29 @@ global invariants); synthetic semantic checks (flat / edge / corner / noise /
 oriented line, plus 90-deg rotation equivariance) through the derived features); and a quality+latency tier (stride
 sweeps scored by energy correlation and circular orientation error, an OpenCV
 correlation sanity check, and reported per-call latency).
+
+## Notes for efficient use
+
+- **Construct once, reuse.** All buffers are allocated in the constructor for a
+  fixed `(H, W)`; `compute`/`features` do no heap allocation. Keep one
+  `StructComputer` per frame size and call it per frame -- do not rebuild it.
+- **Pass the channel view directly.** `hsv[:, :, 2]` (or any strided 2-D `uint8`
+  view) is read in place. Do *not* `np.ascontiguousarray`/`.copy()` it first --
+  that reintroduces the ~20 us per-frame channel copy this avoids.
+- **Use `features()` for the model path.** It returns net-ready float32 maps
+  derived in C++ in the same pass (~10-15 us for the whole pyramid). Deriving the
+  same quantities in Python costs ~10x more. Use `compute()` only when you want
+  the raw sums to derive something custom.
+- **Stride is the main latency lever.** stride 1 -> 2 is ~3x faster for a small,
+  robust quality loss (orientation essentially unchanged). stride >= 4 aliases raw
+  *energy* on sharp edges; prefilter (resize with `INTER_AREA`) before striding
+  that hard. `coherence` and the orientation vector stay robust under stride.
+- **Resize with `INTER_AREA`, not `INTER_NEAREST`.** Gradients are sensitive to
+  nearest-neighbour aliasing in a way moments are not; area resampling gives
+  cleaner orientation.
+- **Pyramid depth is nearly free.** The image is read once regardless of how many
+  levels; a 4-level pyramid costs ~the same as the finest level alone. Levels must
+  be nested finest->coarsest with the finest dividing `(H, W)`.
+- **Channel scales differ.** `coherence`, `ori_cos`, `ori_sin` are bounded
+  ([0,1] / [-1,1]); `energy` and `cornerness` are unbounded per-pixel means -- apply
+  a `log1p` or normalization to those two before a network.
