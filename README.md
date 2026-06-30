@@ -40,14 +40,30 @@ Same "return raw, caller derives" boundary tensorstats holds.
 
 ```python
 import structstats as ss
-from structstats import features as F
 
 sc = ss.StructComputer(shape=(256, 256), grid=[(5, 5), (4, 4)], global_=True)
-r = sc.compute(luma_u8)            # dict: grid_0 (32x32x4), grid_1 (16x16x4), global
-energy = F.energy(r["grid_0"])     # (32, 32)
-theta  = F.orientation(r["grid_0"])
-coh    = F.coherence(r["grid_0"])
+
+# net-ready float32 maps, derived in C++ in the same single pass (channel order
+# = ss.FEATURES). This is the hot path -- no Python per-cell math.
+f = sc.features(luma_u8)         # dict: grid_0 (32,32,5), grid_1 (16,16,5), global (5,)
+# ss.FEATURES == ("energy", "coherence", "ori_cos", "ori_sin", "cornerness")
+
+# or the raw integer sums, if you want to derive your own quantities
+r = sc.compute(luma_u8)          # dict: grid_0 (32,32,4) int64 [Sxx,Syy,Sxy,count], ...
 ```
+
+`features()` returns five float32 channels per cell, all from the three sums:
+`energy = trace/n`, `coherence = |l1-l2|/trace in [0,1]`, the continuous
+double-angle orientation vector `ori_cos = (Sxx-Syy)/trace`,
+`ori_sin = 2 Sxy/trace` (magnitude = coherence, no `atan2`, no wraparound), and
+`cornerness = lambda_min/n`. Orientation is the continuous double-angle vector
+(magnitude = coherence, no `atan2`, no wraparound); recover the angle when needed
+as `0.5*atan2(ori_sin, ori_cos)`. Anything else is a one-liner on the raw sums
+from `compute()` (e.g. Harris = `det - k*trace^2`).
+
+**Zero-copy input.** `compute`/`features` accept a strided 2-D `uint8` view, so
+framegate can pass `hsv[:, :, 2]` (one interleaved channel) directly -- it is read
+in place, with no copy of the frame or the channel.
 
 `compute` returns `(cells_y, cells_x, 4)` int64 arrays, last axis
 `[Sxx, Syy, Sxy, count]`. Replicate border; cell boundaries at full resolution

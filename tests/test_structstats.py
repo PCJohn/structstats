@@ -20,9 +20,35 @@ import numpy as np
 import pytest
 
 import structstats as ss
-from structstats import features as F
 
 rng = np.random.default_rng(0)
+
+
+# --------------------------------------------------------------------------
+# numpy reference derivations (independent oracle for the C++ features()).
+# Input t is (..., 4) = [Sxx, Syy, Sxy, count].
+# --------------------------------------------------------------------------
+def ref_energy(t):  # raw trace
+    return t[..., 0].astype(float) + t[..., 1]
+
+
+def ref_coherence(t):
+    sxx, syy, sxy = (t[..., i].astype(float) for i in range(3))
+    tr = sxx + syy
+    disc = np.sqrt((sxx - syy) ** 2 + 4.0 * sxy * sxy)
+    return np.where(tr > 1e-12, disc / (tr + 1e-12), 0.0)
+
+
+def ref_orientation(t):  # dominant gradient angle in (-pi/2, pi/2]
+    sxx, syy, sxy = (t[..., i].astype(float) for i in range(3))
+    return 0.5 * np.arctan2(2.0 * sxy, sxx - syy)
+
+
+def ref_cornerness(t):  # Shi-Tomasi lambda_min (raw)
+    sxx, syy, sxy = (t[..., i].astype(float) for i in range(3))
+    tr = sxx + syy
+    disc = np.sqrt(((sxx - syy) * 0.5) ** 2 + sxy * sxy)
+    return tr * 0.5 - disc
 
 
 # --------------------------------------------------------------------------
@@ -151,8 +177,8 @@ def _interior(m):  # drop border cells (clamped border distorts them)
 
 def test_horizontal_edge():
     t = ss.StructComputer((256, 256), grid=[(5, 5)]).compute(hedge())["grid_0"]
-    ori = F.orientation(t)
-    coh = F.coherence(t)
+    ori = ref_orientation(t)
+    coh = ref_coherence(t)
     edge = _interior(t[..., 1]) > 0  # cells straddling the edge: strong Syy
     assert edge.any()
     # gradient is vertical -> |orientation| ~ pi/2
@@ -162,8 +188,8 @@ def test_horizontal_edge():
 
 def test_vertical_edge():
     t = ss.StructComputer((256, 256), grid=[(5, 5)]).compute(vedge())["grid_0"]
-    ori = F.orientation(t)
-    coh = F.coherence(t)
+    ori = ref_orientation(t)
+    coh = ref_coherence(t)
     edge = _interior(t[..., 0]) > 0
     assert edge.any()
     assert np.allclose(ori[1:-1, 1:-1][edge], 0.0, atol=0.05)  # horizontal gradient
@@ -172,7 +198,7 @@ def test_vertical_edge():
 
 def test_diagonal_edge():
     t = ss.StructComputer((256, 256), grid=[(5, 5)]).compute(diag())["grid_0"]
-    ori = F.orientation(t)
+    ori = ref_orientation(t)
     energy = t[..., 0] + t[..., 1]
     on = _interior(energy) > np.percentile(energy, 90)
     vals = np.abs(ori[1:-1, 1:-1][on])
@@ -182,18 +208,18 @@ def test_diagonal_edge():
 def test_corner_vs_edge():
     # checkerboard corners: both eigenvalues large -> low coherence, high min-eig
     t = ss.StructComputer((256, 256), grid=[(5, 5)]).compute(checker())["grid_0"]
-    lmin = F.cornerness(t)
-    coh = F.coherence(t)
+    lmin = ref_cornerness(t)
+    coh = ref_coherence(t)
     he = ss.StructComputer((256, 256), grid=[(5, 5)]).compute(hedge())["grid_0"]
     assert _interior(lmin).max() > 0
     # a straight edge has near-zero min eigenvalue; corners do not
-    assert _interior(F.cornerness(he)).max() < 0.05 * _interior(lmin).max()
+    assert _interior(ref_cornerness(he)).max() < 0.05 * _interior(lmin).max()
     assert _interior(coh).mean() < 0.9  # corners reduce coherence
 
 
 def test_noise_is_isotropic():
     t = ss.StructComputer((256, 256), grid=[(4, 4)]).compute(noise())["grid_0"]
-    assert _interior(F.coherence(t)).mean() < 0.3  # no dominant orientation
+    assert _interior(ref_coherence(t)).mean() < 0.3  # no dominant orientation
     assert _interior(t[..., 0] + t[..., 1]).mean() > 0  # but high energy
 
 
@@ -219,7 +245,7 @@ def test_stride_quality(stride):
     corr = np.corrcoef(e1, es)[0, 1]
     strong = e1 > np.percentile(e1, 75)  # orientation only meaningful where energy is
     oerr = _circ_orient_err(
-        F.orientation(t1).ravel()[strong], F.orientation(ts).ravel()[strong]
+        ref_orientation(t1).ravel()[strong], ref_orientation(ts).ravel()[strong]
     )
     med_deg = math.degrees(np.median(oerr))
     print(
@@ -251,7 +277,62 @@ def test_opencv_sanity():
         assert c > 0.99, f"component {k} corr={c:.3f}"
 
 
-def test_latency(capsys):
+def test_zero_copy_strided_channel():
+    # framegate passes hsv[:, :, 2]: a non-contiguous 2-D view. Result must match
+    # the contiguous copy exactly, with no ascontiguousarray in the path.
+    img = textured()
+    hsv = np.zeros((256, 256, 3), np.uint8)
+    hsv[:, :, 2] = img
+    v = hsv[:, :, 2]
+    assert not v.flags["C_CONTIGUOUS"]
+    sc = ss.StructComputer((256, 256), grid=[(5, 5), (4, 4)])
+    a, b = sc.compute(img), sc.compute(v)
+    for k in a:
+        assert np.array_equal(a[k], b[k])
+
+
+def test_cpp_features_match_python():
+    img = textured()
+    sc = ss.StructComputer((256, 256), grid=[(5, 5)], global_=True)
+    raw = sc.compute(img)["grid_0"]
+    fe = sc.features(img)["grid_0"]
+    n = np.maximum(raw[..., 3].astype(float), 1.0)
+    coh, ori = ref_coherence(raw), ref_orientation(raw)
+    assert ss.FEATURES == ("energy", "coherence", "ori_cos", "ori_sin", "cornerness")
+    assert np.allclose(fe[..., 0], ref_energy(raw) / n, rtol=1e-5)
+    assert np.allclose(fe[..., 1], coh, atol=1e-5)
+    assert np.allclose(fe[..., 2], coh * np.cos(2 * ori), atol=1e-5)
+    assert np.allclose(fe[..., 3], coh * np.sin(2 * ori), atol=1e-5)
+    assert np.allclose(fe[..., 4], ref_cornerness(raw) / n, atol=1e-4)
+
+
+def test_latency_end_to_end(capsys):
+    # full path as framegate would call it: strided V channel in, float maps out
+    img = textured()
+    hsv = np.zeros((256, 256, 3), np.uint8)
+    hsv[:, :, 2] = img
+    v = hsv[:, :, 2]
+    pyr = [(5, 5), (4, 4), (3, 3), (2, 2)]
+    sc = ss.StructComputer(img.shape, grid=pyr, global_=True)
+
+    def feats():
+        return sc.features(v)
+
+    for _ in range(20):
+        feats()
+    best = []
+    for _ in range(50):
+        t0 = time.perf_counter()
+        feats()
+        best.append(time.perf_counter() - t0)
+    best.sort()
+    p50 = best[len(best) // 2] * 1e3
+    with capsys.disabled():
+        print(
+            f"\n  end-to-end (strided V -> 4-level float feature maps): "
+            f"p50={p50:.3f} ms, min={best[0] * 1e3:.3f} ms"
+        )
+    assert p50 < 5.0
     img = textured()
     pyr = [(5, 5), (4, 4), (3, 3), (2, 2)]
     sc = ss.StructComputer(img.shape, grid=pyr, global_=True)

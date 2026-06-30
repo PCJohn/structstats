@@ -18,10 +18,12 @@ the library returns the sums, which do).
 import numpy as np
 
 from . import structstats_core as _core
-from . import features
 
-__all__ = ["StructComputer", "features"]
+__all__ = ["StructComputer", "FEATURES"]
 __version__ = "0.1.0"
+
+# Channel order of the float32 maps returned by StructComputer.features().
+FEATURES = ("energy", "coherence", "ori_cos", "ori_sin", "cornerness")
 
 
 def _parse_grid(grid):
@@ -70,12 +72,27 @@ class StructComputer:
             list(self._shape), self._grid, _parse_stride(stride), global_
         )
 
-    def compute(self, img):
+    def _run(self, fn, img):
         if img.shape != self._shape:
             raise ValueError(f"shape mismatch: expected {self._shape}, got {img.shape}")
         if img.dtype != np.uint8:
             raise TypeError("input must be uint8 single-channel luma")
-        lv = self._impl.compute(np.ascontiguousarray(img))
+        return fn(img)  # strided 2-D views are read in place, no copy
+
+    def compute(self, img):
+        """Raw integer tensor sums per cell: dict of (cells_y, cells_x, 4) int64
+        arrays [Sxx, Syy, Sxy, count], plus "global" (4,) if requested."""
+        lv = self._run(self._impl.raw, img)
+        out = {k: lv[i].copy() for i, k in enumerate(self._keys)}
+        if self._global:
+            out["global"] = lv[len(self._keys)].copy()
+        return out
+
+    def features(self, img):
+        """Net-ready derived maps, computed in C++ in the same pass: dict of
+        (cells_y, cells_x, len(FEATURES)) float32 arrays (channel order = FEATURES),
+        plus "global" (len(FEATURES),) if requested."""
+        lv = self._run(self._impl.features, img)
         out = {k: lv[i].copy() for i, k in enumerate(self._keys)}
         if self._global:
             out["global"] = lv[len(self._keys)].copy()
