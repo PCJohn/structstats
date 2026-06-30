@@ -41,7 +41,7 @@ Same "return raw, caller derives" boundary tensorstats holds.
 ```python
 import structstats as ss
 
-sc = ss.StructComputer(shape=(256, 256), grid=[(5, 5), (4, 4)], global_=True)
+sc = ss.StructComputer(shape=(256, 256), grid=[(5, 5), (4, 4)])
 
 # net-ready float32 maps, derived in C++ in the same single pass (channel order
 # = ss.FEATURES). This is the hot path -- no Python per-cell math.
@@ -78,6 +78,6 @@ pytest -s        # -s prints the quality (stride) and latency numbers
 
 Three tiers: bit-exact integer equality vs a numpy reference (plus multi-scale and
 global invariants); synthetic semantic checks (flat / edge / corner / noise /
-oriented line through the derived features); and a quality+latency tier (stride
+oriented line, plus 90-deg rotation equivariance) through the derived features); and a quality+latency tier (stride
 sweeps scored by energy correlation and circular orientation error, an OpenCV
 correlation sanity check, and reported per-call latency).

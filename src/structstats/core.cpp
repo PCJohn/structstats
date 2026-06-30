@@ -80,7 +80,6 @@ namespace
   class StructComputer
   {
     int h_ = 0, w_ = 0, sy_ = 1, sx_ = 1;
-    bool want_global_ = false;
     std::vector<Level> levels_;    // finest first
     std::vector<int> row_cell_;    // finest row binning (full-res boundaries)
     std::vector<int16_t> vs_, vd_; // per-row separable Sobel caches
@@ -89,7 +88,7 @@ namespace
     std::vector<size_t> graw_shape_{(size_t)NCOMP}, gfeat_shape_{(size_t)NF};
 
     // Single pass over the image -> finest grid; then aggregate coarser levels and
-    // (if requested) the global tensor. rs, cs are the input strides in elements.
+    // the global tensor. rs, cs are the input strides in elements.
     void accumulate(const uint8_t *SS_RESTRICT img, int64_t rs, int64_t cs)
     {
       const int hi_r = h_ - 1, hi_c = w_ - 1;
@@ -157,8 +156,7 @@ namespace
         }
       }
 
-      if (want_global_)
-      {
+      { // global = sum over the coarsest (smallest) level -- a few dozen adds
         const Level &last = levels_.back();
         const int64_t *SS_RESTRICT lb = last.buf.data();
         const size_t nc = (size_t)last.ny * last.nx;
@@ -188,8 +186,7 @@ namespace
         for (size_t c = 0; c < nc; ++c)
           derive_cell(b + c * NCOMP, f + c * NF);
       }
-      if (want_global_)
-        derive_cell(graw_, gfeat_);
+      derive_cell(graw_, gfeat_);
     }
 
   public:
@@ -197,13 +194,12 @@ namespace
 
     void set_config(const std::vector<int64_t> &shape,
                     const std::vector<std::vector<int>> &grids,
-                    const std::vector<int64_t> &stride, bool want_global)
+                    const std::vector<int64_t> &stride)
     {
       h_ = (int)shape[0];
       w_ = (int)shape[1];
       sy_ = (int)stride[0];
       sx_ = (int)stride[1];
-      want_global_ = want_global;
 
       levels_.clear();
       for (size_t k = 0; k < grids.size(); ++k)
@@ -247,9 +243,8 @@ namespace
       for (Level &L : levels_)
         out.append(nb::ndarray<nb::numpy, int64_t>(L.buf.data(), L.rshape.size(),
                                                    L.rshape.data(), nb::handle()));
-      if (want_global_)
-        out.append(nb::ndarray<nb::numpy, int64_t>(graw_, graw_shape_.size(),
-                                                   graw_shape_.data(), nb::handle()));
+      out.append(nb::ndarray<nb::numpy, int64_t>(graw_, graw_shape_.size(),
+                                                 graw_shape_.data(), nb::handle()));
       return out;
     }
 
@@ -261,9 +256,8 @@ namespace
       for (Level &L : levels_)
         out.append(nb::ndarray<nb::numpy, float>(L.feat.data(), L.fshape.size(),
                                                  L.fshape.data(), nb::handle()));
-      if (want_global_)
-        out.append(nb::ndarray<nb::numpy, float>(gfeat_, gfeat_shape_.size(),
-                                                 gfeat_shape_.data(), nb::handle()));
+      out.append(nb::ndarray<nb::numpy, float>(gfeat_, gfeat_shape_.size(),
+                                               gfeat_shape_.data(), nb::handle()));
       return out;
     }
   };
@@ -278,7 +272,7 @@ NB_MODULE(structstats_core, m)
   nb::class_<StructComputer>(m, "_StructComputerImpl")
       .def(nb::init<>())
       .def("set_config", &StructComputer::set_config, nb::arg("shape"),
-           nb::arg("grids"), nb::arg("stride"), nb::arg("want_global"))
+           nb::arg("grids"), nb::arg("stride"))
       .def(
           "raw",
           [](StructComputer &self, Arr a)

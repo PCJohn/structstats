@@ -165,7 +165,7 @@ def test_multiscale_consistency():
 
 
 def test_global_equals_total():
-    sc = ss.StructComputer((256, 256), grid=[(5, 5)], global_=True)
+    sc = ss.StructComputer((256, 256), grid=[(5, 5)])
     r = sc.compute(textured())
     assert np.array_equal(r["global"], r["grid_0"].reshape(-1, 4).sum(0))
 
@@ -221,6 +221,28 @@ def test_noise_is_isotropic():
     t = ss.StructComputer((256, 256), grid=[(4, 4)]).compute(noise())["grid_0"]
     assert _interior(ref_coherence(t)).mean() < 0.3  # no dominant orientation
     assert _interior(t[..., 0] + t[..., 1]).mean() > 0  # but high energy
+
+
+def test_rotation_equivariance():
+    # A 90-deg rotation swaps Gx<->Gy and flips the sign of Gx*Gy, so on the
+    # structure tensor: Sxx<->Syy, Sxy->-Sxy (exact, integer). Hence energy,
+    # coherence and cornerness are invariant, and the orientation vector negates
+    # (theta -> theta +/- pi/2, i.e. 2theta -> 2theta +/- pi).
+    n = 256
+    img = (127 + 100 * np.sin(np.mgrid[0:n, 0:n][1] / 5.0)).astype(np.uint8)  # vertical
+    sc = ss.StructComputer((n, n), grid=[(5, 5)])
+    a = sc.compute(img)["global"]
+    b = sc.compute(np.ascontiguousarray(np.rot90(img)))["global"]
+    assert b[0] == a[1] and b[1] == a[0] and b[2] == -a[2] and b[3] == a[3]
+
+    fa = sc.features(img)["global"]
+    fb = sc.features(np.ascontiguousarray(np.rot90(img)))["global"]
+    assert fa[1] > 0.5  # strongly anisotropic, so the checks below are meaningful
+    assert np.allclose(fa[0], fb[0])  # energy invariant
+    assert np.allclose(fa[1], fb[1])  # coherence invariant
+    assert np.allclose(fa[4], fb[4])  # cornerness invariant
+    assert np.allclose(fa[2], -fb[2], atol=1e-6)  # ori_cos negates
+    assert np.allclose(fa[3], -fb[3], atol=1e-6)  # ori_sin negates
 
 
 # ============================== Tier 3: quality + latency =================
@@ -293,7 +315,7 @@ def test_zero_copy_strided_channel():
 
 def test_cpp_features_match_python():
     img = textured()
-    sc = ss.StructComputer((256, 256), grid=[(5, 5)], global_=True)
+    sc = ss.StructComputer((256, 256), grid=[(5, 5)])
     raw = sc.compute(img)["grid_0"]
     fe = sc.features(img)["grid_0"]
     n = np.maximum(raw[..., 3].astype(float), 1.0)
@@ -313,7 +335,7 @@ def test_latency_end_to_end(capsys):
     hsv[:, :, 2] = img
     v = hsv[:, :, 2]
     pyr = [(5, 5), (4, 4), (3, 3), (2, 2)]
-    sc = ss.StructComputer(img.shape, grid=pyr, global_=True)
+    sc = ss.StructComputer(img.shape, grid=pyr)
 
     def feats():
         return sc.features(v)
@@ -335,7 +357,7 @@ def test_latency_end_to_end(capsys):
     assert p50 < 5.0
     img = textured()
     pyr = [(5, 5), (4, 4), (3, 3), (2, 2)]
-    sc = ss.StructComputer(img.shape, grid=pyr, global_=True)
+    sc = ss.StructComputer(img.shape, grid=pyr)
     for _ in range(20):
         sc.compute(img)  # warmup
     best = []

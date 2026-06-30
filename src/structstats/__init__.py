@@ -9,7 +9,7 @@ the library returns the sums, which do).
     import structstats as ss
     from structstats import features as F
 
-    sc = ss.StructComputer(shape=(256, 256), grid=[(5, 5), (4, 4)], global_=True)
+    sc = ss.StructComputer(shape=(256, 256), grid=[(5, 5), (4, 4)])
     r = sc.compute(luma_u8)          # dict: grid_0, grid_1, global
     energy = F.energy(r["grid_0"])   # (32, 32)
     theta  = F.orientation(r["grid_0"])
@@ -57,20 +57,17 @@ class StructComputer:
                the image, so the image is read exactly once whatever the depth.
     stride   : None/int/(sy, sx). Subsamples which pixels accumulate; gradient
                stencil and cell boundaries stay at full resolution.
-    global_  : also return a single all-pixels tensor under key "global".
+    A single all-frame "global" tensor is always returned alongside the levels.
     """
 
-    def __init__(self, shape, grid, stride=None, global_=False):
+    def __init__(self, shape, grid, stride=None):
         if len(shape) != 2:
             raise ValueError("shape must be 2-D (H, W) single-channel luma")
         self._shape = (int(shape[0]), int(shape[1]))
         self._grid = _parse_grid(grid)
-        self._global = global_
         self._keys = [f"grid_{i}" for i in range(len(self._grid))]
         self._impl = _core._StructComputerImpl()
-        self._impl.set_config(
-            list(self._shape), self._grid, _parse_stride(stride), global_
-        )
+        self._impl.set_config(list(self._shape), self._grid, _parse_stride(stride))
 
     def _run(self, fn, img):
         if img.shape != self._shape:
@@ -81,19 +78,17 @@ class StructComputer:
 
     def compute(self, img):
         """Raw integer tensor sums per cell: dict of (cells_y, cells_x, 4) int64
-        arrays [Sxx, Syy, Sxy, count], plus "global" (4,) if requested."""
+        arrays [Sxx, Syy, Sxy, count], plus "global" (4,) over the whole frame."""
         lv = self._run(self._impl.raw, img)
         out = {k: lv[i].copy() for i, k in enumerate(self._keys)}
-        if self._global:
-            out["global"] = lv[len(self._keys)].copy()
+        out["global"] = lv[len(self._keys)].copy()
         return out
 
     def features(self, img):
         """Net-ready derived maps, computed in C++ in the same pass: dict of
         (cells_y, cells_x, len(FEATURES)) float32 arrays (channel order = FEATURES),
-        plus "global" (len(FEATURES),) if requested."""
+        plus "global" (len(FEATURES),) over the whole frame."""
         lv = self._run(self._impl.features, img)
         out = {k: lv[i].copy() for i, k in enumerate(self._keys)}
-        if self._global:
-            out["global"] = lv[len(self._keys)].copy()
+        out["global"] = lv[len(self._keys)].copy()
         return out
